@@ -22,8 +22,8 @@ import "labrpc"
 import "time"
 import "math/rand"
 
-// import "bytes"
-// import "encoding/gob"
+import "bytes"
+import "encoding/gob"
 
 // import "fmt"
 
@@ -130,6 +130,17 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+
+	// what should be persistent
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -142,6 +153,14 @@ func (rf *Raft) readPersist(data []byte) {
 	// d := gob.NewDecoder(r)
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
+
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+
+	// what should be persistent
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.log)
 }
 
 
@@ -180,6 +199,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
 	rf.mu.Lock()			// lock
 	defer rf.mu.Unlock()	// unlock before return
+	defer rf.persist()		// persist before responding to RPCs
 
 	// Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
@@ -201,9 +221,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
 	grandVote := false
 
-	if rf.votedFor == -1 {
-		grandVote = true
-	} else {
+	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		// Raft determines which of two logs is more up-to-date by comparing the index and term of the last entries in the logs.
 		// If the logs have last entries with different terms, then the log with the later term is more up-to-date. 
 		// If the logs end with the same term, then whichever log is longer is more up-to-date.
@@ -257,6 +275,7 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 			rf.currentTerm = reply.Term
 			rf.state = FOLLOWER
 			rf.votedFor = -1
+			rf.persist()
 		} else if reply.VoteGranted {
 			// success to get one vote
 			rf.votesCount ++
@@ -333,6 +352,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	*/
 	rf.mu.Lock()			// lock
 	defer rf.mu.Unlock()	// unlock before return
+	defer rf.persist()		// persist before responding to RPCs
 
 	// 1. Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
@@ -369,10 +389,10 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	if rfTerm != args.PrevLogTerm {
 		// an entry at prevLogIndex whose term doesn't matche prevLogTerm
 		// calculate the NextIndex: The max index whose term is not the same
-		for i := args.PrevLogTerm - 1; i >= 0; i-- {
+		for i := args.PrevLogIndex - 1; i >= 0; i-- {
 			if rfTerm != rf.log[i].Term {
 				reply.NextIndex = i + 1
-				return
+				break
 			}
 		}
 		return
@@ -424,9 +444,10 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 	if ok {
 		// If RPC request or response contains term T > currentTerm: set currentTerm = T, convert to follower
 		if reply.Term > rf.currentTerm {
-			rf.currentTerm = args.Term
+			rf.currentTerm = reply.Term
 			rf.state = FOLLOWER
 			rf.votedFor = -1
+			rf.persist()
 		} else if reply.Success {
 			// Not only a heartbeat
 			if len(args.Entries) > 0 {
@@ -535,6 +556,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// the index that the command will appear at if it's ever committed
 		index = rf.getLastEntryIndex() + 1
 		rf.log = append(rf.log, LogEntry{Command:command, Term:term, Index:index})
+		rf.persist()
 	}
 
 	return index, term, isLeader
@@ -615,6 +637,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				rf.currentTerm ++
 				rf.votedFor = rf.me
 				rf.votesCount = 1
+				rf.persist()
 				rf.mu.Unlock()	// unlock
 
 				go rf.sendAllRequestVote()
@@ -643,9 +666,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				
 				// If election timeout elapses: start new election
 				case <- time.After(time.Duration(rand.Intn(151)+150) * time.Millisecond):
-					rf.mu.Lock()
-					rf.currentTerm --
-					rf.mu.Unlock()
 				}
 
 			case LEADER:
